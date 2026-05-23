@@ -7,6 +7,11 @@ TEST*/
 # Ignore reference directories (e.g., 参考プログラム)
 参考*/
 
+# Excel / VBA Temporary and Log files
+~$*
+*.log
+*.tmp
+
 # Optional: Ignore the generated output folder
 output_results/
 
