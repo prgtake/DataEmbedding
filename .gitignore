@@ -1,0 +1,15 @@
+# Ignore backup directories
+BKUP*/
+
+# Ignore test directories
+TEST*/
+
+# Ignore reference directories (e.g., 参考プログラム)
+参考*/
+
+# Optional: Ignore the generated output folder
+output_results/
+
+# Optional: Ignore generated Excel files from tests
+survey_data.xlsx
+*.bak
