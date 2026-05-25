@@ -24,7 +24,7 @@ Private Sub CommandButton1_Click()
     If (TextBox1.Text <> "" And TextBox2.Text <> "" And TextBox3.Text <> "" _
         And ComboBox1.Text <> "" And ComboBox2.Text <> "") Then
 
-        Call Module1.ProcessDataEmbedding( _
+        Call ProcessDataEmbedding( _
             TextBox1.Text, _
             ComboBox1.Text, _
             ComboBox2.Text, _

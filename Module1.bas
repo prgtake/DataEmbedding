@@ -7,7 +7,7 @@ Attribute VB_Name = "Module1"
 Option Explicit
 
 ' --- Version Management ---
-Public Const APP_VERSION As String = "1.0.0"
+Public Const APP_VERSION As String = "1.1.0"
 
 ' --- Startup ---
 Sub auto_open()
@@ -59,6 +59,22 @@ Private Function GetLocalPath(ByVal folderPath As String) As String
     End If
 End Function
 
+' --- Helper to Log Messages ---
+Private Sub LogMessage(ByVal msg As String, ByVal outputDir As String)
+    On Error Resume Next
+    Dim fso As Object
+    Dim ts As Object
+    Dim logFile As String
+    logFile = outputDir & "\process_log.txt"
+    
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    ' Open for appending (8), create if not exists (True)
+    Set ts = fso.OpenTextFile(logFile, 8, True)
+    ts.WriteLine Format(Now, "yyyy/mm/dd hh:mm:ss") & " : " & msg
+    ts.Close
+    On Error GoTo 0
+End Sub
+
 ' --- Main Logic for Data Embedding (Injection Method) ---
 Public Sub ProcessDataEmbedding(ByVal targetPath As String, _
                                ByVal templateName As String, _
@@ -96,6 +112,13 @@ Public Sub ProcessDataEmbedding(ByVal targetPath As String, _
 
     ' Set output directory relative to this workbook
     outputDir = GetLocalPath(ThisWorkbook.Path) & "\output_results"
+    
+    ' Initialization of logging
+    On Error Resume Next
+    MkDir outputDir
+    On Error GoTo ErrorHandler
+    LogMessage "=== Process Started ===", outputDir
+    LogMessage "TargetPath: " & targetPath, outputDir
 
     backupPath = targetPath & ".bak"
 
@@ -113,12 +136,13 @@ Public Sub ProcessDataEmbedding(ByVal targetPath As String, _
     Application.ScreenUpdating = False
 
     On Error Resume Next
-    MkDir outputDir
     ChDir outputDir
     Kill outputDir & "\*.xlsx"
+    If Err.Number <> 0 Then Err.Clear
     On Error GoTo ErrorHandler
     
     ' Create backup
+    LogMessage "Creating backup...", outputDir
     Set fso = CreateObject("Scripting.FileSystemObject")
     If fso.FileExists(backupPath) Then fso.DeleteFile backupPath
     fso.CopyFile targetPath, backupPath
@@ -131,19 +155,20 @@ Public Sub ProcessDataEmbedding(ByVal targetPath As String, _
     End With
 
     ' Open Master Workbook as ReadOnly to prevent AutoSave/OneDrive locks
+    LogMessage "Opening master workbook as ReadOnly...", outputDir
+    Application.EnableEvents = False
     Set targetWb = Workbooks.Open(Filename:=targetPath, ReadOnly:=True)
     
-    ' Disable AutoSave if applicable (OneDrive/SharePoint)
-    On Error Resume Next
-    targetWb.AutoSaveOn = False
-    On Error GoTo ErrorHandler
+    ' (AutoSaveOn removed to ensure compatibility with older Excel versions)
     
     On Error Resume Next
     Set dataWs = targetWb.Worksheets(dataName)
     Set templateWs = targetWb.Worksheets(templateName)
+    If Err.Number <> 0 Then Err.Clear
     On Error GoTo ErrorHandler
     
     If dataWs Is Nothing Or templateWs Is Nothing Then
+        LogMessage "Error: Specified sheets were not found.", outputDir
         MsgBox "Specified sheets were not found.", vbCritical, "Error"
         GoTo Cleanup
     End If
@@ -152,6 +177,7 @@ Public Sub ProcessDataEmbedding(ByVal targetPath As String, _
     defaultDataRow = startRow + 1
 
     ' --- Duplicate Check (Optimized with Dictionary) ---
+    LogMessage "Running duplicate check...", outputDir
     Dim dict As Object
     Set dict = CreateObject("Scripting.Dictionary")
     currentRow = defaultDataRow
@@ -161,6 +187,7 @@ Public Sub ProcessDataEmbedding(ByVal targetPath As String, _
         keyVal = CStr(dataWs.Cells(currentRow, 1).Value)
         
         If dict.exists(keyVal) Then
+            LogMessage "Error: Duplicate key found: " & keyVal, outputDir
             MsgBox "Duplicate keys found: " & keyVal & " (Row: " & currentRow & ")", vbCritical, "Error"
             GoTo Cleanup
         Else
@@ -176,40 +203,109 @@ Public Sub ProcessDataEmbedding(ByVal targetPath As String, _
     currentRow = defaultDataRow
 
     ' --- Main Loop ---
+    LogMessage "Starting main loop...", outputDir
     Do While dataWs.Cells(currentRow, 1).Value <> ""
         
-        Set outWb = Nothing
-        sheetCount = 0
+        Dim tempPath As String
+        Dim targetExt As String
+        targetExt = fso.GetExtensionName(targetPath)
         
-        ' Loop for sheets per book
+        ' Using a temporary file to preserve workbook properties (Subtraction Method)
+        tempPath = outputDir & "\tmp_" & timestampStr & "_" & fileIndex & "." & targetExt
+        
+        LogMessage "Loop Index " & fileIndex & ": Creating temp copy...", outputDir
+        ' 1. Create a copy of the target workbook to preserve all properties/styles
+        targetWb.SaveCopyAs tempPath
+        
+        ' 2. Open the copy
+        LogMessage "Opening temp copy: " & tempPath, outputDir
+        Application.EnableEvents = False
+        Set outWb = Workbooks.Open(tempPath)
+        outWb.Activate
+        
+        ' (AutoSaveOn removed for compatibility)
+        
+        Dim outDataWs As Worksheet
+        Dim outTemplateWs As Worksheet
+        On Error Resume Next
+        Set outDataWs = outWb.Worksheets(dataName)
+        Set outTemplateWs = outWb.Worksheets(templateName)
+        If Err.Number <> 0 Then Err.Clear
+        On Error GoTo ErrorHandler
+        
+        ' Record original sheets to delete them later (Subtraction)
+        Dim originalSheets As Object
+        Set originalSheets = CreateObject("Scripting.Dictionary")
+        Dim wsObj As Object
+        For Each wsObj In outWb.Sheets
+            ' Do NOT add the template sheet to the delete list, we will keep it as a result sheet
+            If wsObj.Name <> templateName Then
+                originalSheets.Add wsObj.Name, True
+            End If
+        Next wsObj
+        
+        sheetCount = 0
+        ' Inner loop for sheets per book
         Do While sheetCount < sheetsPerBook
             newFileName = dataWs.Cells(currentRow, 1).Value
             If newFileName = "" Then Exit Do
             
-            ' Injection Method: Copy current record to the default row
-            If currentRow <> defaultDataRow Then
-                dataWs.Rows(currentRow).Copy Destination:=dataWs.Rows(defaultDataRow)
-            End If
+            LogMessage "Processing record: " & newFileName, outputDir
+            ' Injection Method: Copy current record to the default row in the OUTPUT workbook
+            dataWs.Rows(currentRow).Copy Destination:=outDataWs.Rows(defaultDataRow)
             
-            ' Copy updated template
-            If outWb Is Nothing Then
-                templateWs.Copy
-                Set outWb = ActiveWorkbook
+            ' Ensure formulas are fully updated across all sheets
+            Application.CalculateFull
+            DoEvents
+            
+            Dim workingWs As Worksheet
+            ' If this is the last record for this book, use the original template to preserve links
+            If sheetCount = sheetsPerBook - 1 Or dataWs.Cells(currentRow + 1, 1).Value = "" Then
+                Set workingWs = outTemplateWs
+                LogMessage "Using original template sheet to preserve links.", outputDir
             Else
-                templateWs.Copy After:=outWb.Sheets(outWb.Sheets.Count)
+                ' Otherwise, copy the template
+                LogMessage "Copying template sheet...", outputDir
+                outTemplateWs.Copy After:=outWb.Sheets(outWb.Sheets.Count)
+                Set workingWs = outWb.Sheets(outWb.Sheets.Count)
             End If
             
-            ' Set Sheet Name
+            ' Set Sheet Name (Clean invalid characters)
+            Dim cleanName As String
+            cleanName = newFileName
+            Dim invalidChars As Variant
+            invalidChars = Array("\", "/", ":", "?", "*", "[", "]")
+            Dim charIdx As Integer
+            For charIdx = LBound(invalidChars) To UBound(invalidChars)
+                cleanName = Replace(cleanName, invalidChars(charIdx), "")
+            Next charIdx
+            
             On Error Resume Next
-            ActiveSheet.Name = Left(Replace(Replace(Replace(Replace(Replace(Replace(Replace(newFileName, "\", ""), "/", ""), ":", ""), "?", ""), "*", ""), "[", ""), "]", ""), 31)
+            workingWs.Name = Left(cleanName, 31)
+            If Err.Number <> 0 Then Err.Clear
             On Error GoTo ErrorHandler
             
-            ' Paste Values
-            Cells.Select
+            ' Paste Values to break formula links but keep the result
+            LogMessage "Pasting values and freezing shapes for sheet: " & workingWs.Name, outputDir
+            outWb.Activate
+            workingWs.Activate
+            
+            ' Freeze Shapes/Textboxes
+            Dim shp As Object
+            For Each shp In workingWs.Shapes
+                On Error Resume Next
+                If shp.DrawingObject.Formula <> "" Then
+                    shp.DrawingObject.Formula = ""
+                End If
+                If Err.Number <> 0 Then Err.Clear
+                On Error GoTo ErrorHandler
+            Next shp
+            
+            workingWs.Cells.Select
             Selection.Copy
             Selection.PasteSpecial Paste:=xlValues, Operation:=xlNone, SkipBlanks:=False, Transpose:=False
             Application.CutCopyMode = False
-            Cells(1, 1).Select
+            workingWs.Cells(1, 1).Select
             
             currentRow = currentRow + 1
             sheetCount = sheetCount + 1
@@ -218,28 +314,59 @@ Public Sub ProcessDataEmbedding(ByVal targetPath As String, _
             If dataWs.Cells(currentRow, 1).Value = "" Then Exit Do
         Loop
         
-        ' Save output workbook
+        ' 3. Subtract: Delete original master sheets (except the template which was repurposed)
+        LogMessage "Subtracting (deleting) original sheets...", outputDir
+        Application.DisplayAlerts = False
+        Dim k As Variant, i As Long
+        k = originalSheets.Keys
+        For i = 0 To originalSheets.Count - 1
+            On Error Resume Next
+            ' Check if the sheet still exists under its original name before deleting
+            Dim wsToDelete As Worksheet
+            Set wsToDelete = Nothing
+            Set wsToDelete = outWb.Worksheets(CStr(k(i)))
+            
+            If Not wsToDelete Is Nothing Then
+                wsToDelete.Delete
+                LogMessage "Deleted original sheet: " & k(i), outputDir
+            End If
+            If Err.Number <> 0 Then Err.Clear
+            On Error GoTo ErrorHandler
+        Next i
+        Application.DisplayAlerts = True
+        
+        ' 4. Save output workbook as .xlsx (removes VBA and keeps properties)
         If Not outWb Is Nothing Then
             Application.DisplayAlerts = False
+            Dim finalFileName As String
             If sheetsPerBook = 1 Then
-                outWb.SaveAs Filename:=outputDir & "\" & outWb.Sheets(1).Name & ".xlsx", _
-                    FileFormat:=xlOpenXMLWorkbook, ReadOnlyRecommended:=False
+                finalFileName = outputDir & "\" & outWb.Sheets(1).Name & ".xlsx"
             Else
-                outWb.SaveAs Filename:=outputDir & "\" & timestampStr & "_" & templateName & "_" & fileIndex & ".xlsx", _
-                    FileFormat:=xlOpenXMLWorkbook, ReadOnlyRecommended:=False
+                finalFileName = outputDir & "\" & timestampStr & "_" & templateName & "_" & fileIndex & ".xlsx"
             End If
+            
+            LogMessage "Saving final workbook: " & finalFileName, outputDir
+            outWb.SaveAs Filename:=finalFileName, _
+                FileFormat:=51, ReadOnlyRecommended:=False ' 51 = xlOpenXMLWorkbook
             Application.DisplayAlerts = True
+            
             outWb.Close SaveChanges:=False
             fileIndex = fileIndex + 1
         End If
         
+        ' Cleanup temp file
+        If fso.FileExists(tempPath) Then fso.DeleteFile tempPath
+        Application.EnableEvents = True
     Loop
  
+    LogMessage "=== Process Completed Successfully ===", outputDir
     Beep
     MsgBox "Process completed successfully.", vbInformation, "Done"
 
 Cleanup:
     On Error Resume Next
+    LogMessage "Running Cleanup...", outputDir
+    Application.EnableEvents = True
     If Not targetWb Is Nothing Then
         Application.DisplayAlerts = False
         targetWb.Close SaveChanges:=False
@@ -249,8 +376,6 @@ Cleanup:
     ' --- Restore from Backup and Cleanup ---
     If Not fso Is Nothing Then
         If fso.FileExists(backupPath) Then
-            ' Attempt to restore. If targetPath is locked, this might fail, but since we opened as ReadOnly, 
-            ' targetPath is likely unmodified anyway.
             fso.CopyFile backupPath, targetPath, True
             fso.DeleteFile backupPath
         End If
@@ -261,6 +386,7 @@ Cleanup:
     Set shellApp = CreateObject("WScript.Shell")
     On Error Resume Next
     shellApp.Run """" & Environ("LocalAppData") & "\Microsoft\OneDrive\OneDrive.exe""", 1, False
+    If Err.Number <> 0 Then LogMessage "Warning: Failed to restart OneDrive.", outputDir
     On Error GoTo 0
     ' -------------------------------------------
     
@@ -268,6 +394,9 @@ Cleanup:
     Exit Sub
 
 ErrorHandler:
-    MsgBox "An unexpected error occurred: " & Err.Description, vbCritical, "System Error"
+    Dim errDesc As String
+    errDesc = "Error " & Err.Number & ": " & Err.Description
+    LogMessage "FATAL ERROR: " & errDesc, outputDir
+    MsgBox "An unexpected error occurred: " & errDesc, vbCritical, "System Error"
     Resume Cleanup
 End Sub
