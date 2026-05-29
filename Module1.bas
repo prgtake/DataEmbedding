@@ -251,8 +251,13 @@ Public Sub ProcessDataEmbedding(ByVal targetPath As String, _
             If newFileName = "" Then Exit Do
             
             LogMessage "Processing record: " & newFileName, outputDir
-            ' Injection Method: Copy current record to the default row in the OUTPUT workbook
-            dataWs.Rows(currentRow).Copy Destination:=outDataWs.Rows(defaultDataRow)
+            
+            ' Injection Method: Directly assign values to row 2 of the OUTPUT data sheet
+            ' This is more reliable than Copy/Paste and triggers formulas correctly
+            Dim lastCol As Long
+            lastCol = dataWs.Cells(1, dataWs.Columns.Count).End(xlToLeft).Column
+            outDataWs.Range(outDataWs.Cells(2, 1), outDataWs.Cells(2, lastCol)).Value = _
+                dataWs.Range(dataWs.Cells(currentRow, 1), dataWs.Cells(currentRow, lastCol)).Value
             
             ' Ensure formulas are fully updated across all sheets
             Application.CalculateFull
